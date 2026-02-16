@@ -1,0 +1,1813 @@
+import React, { useEffect, useMemo, useState } from "react";
+
+/**
+ * Lietke Ryder Cup – match play scorer (polished)
+ *
+ * Includes:
+ * - Hole-by-hole raw strokes (auto hole winners + match status/result)
+ * - Quick Entry (current hole)
+ * - Print/Share Scoreboard
+ * - Export CSV + Excel (.xls)
+ * - Easy per-match player editing
+ * - Team themes: Cobra Kai (black/yellow) + Lombardo (blue/white)
+ * - Player Records leaderboard
+ * - Dark mode
+ * - Global Roster Editor (edit once, use everywhere)
+ * - Share link + QR code (imports state via URL hash)
+ * - Mobile Scorekeeper Mode (one match fullscreen + big inputs)
+ */
+
+const STORAGE_KEY = "lietke_rydercup_state_v5";
+const DARK_KEY = "lietke_dark";
+
+// -------------------------
+// Default schedule seed
+// -------------------------
+
+const DEFAULT_DATA = {
+  teams: ["Cobra Kai", "Lombardo"],
+  roster: {
+    A: [
+      "Kevin Dever",
+      "Dave Santini",
+      "Andy Malinovich",
+      "Chris Loding",
+      "Patty Mihelich",
+      "Jonny Garcia",
+      "Brandon Lietke",
+      "Rick Barnak",
+      "Chad Koch",
+      "Ken Mihelich",
+      "Steve Gordon",
+      "Marc Loding",
+      "Jamie Gordon",
+      "Pat Stevens"
+    ],
+    B: [
+      "Troy Staten",
+      "Garett Urban",
+      "Jeremy Smith",
+      "Scott Barnak",
+      "Steve Seargeant",
+      "Chris Zale",
+      "Jason Collinsworth",
+      "Matt Poet",
+      "Nathan Lietke",
+      "Dan Morrell",
+      "Rob Juncaj"
+    ]
+  },
+  sessions: [
+    {
+      id: "fri_pm",
+      name: "Friday Afternoon Scramble",
+      format: "2-man scramble (match play)",
+      matches: [
+        { id: "fri-1", time: "1:12 PM", aPlayers: "Kevin Dever / Dave Santini", bPlayers: "Troy Staten / Garett Urban" },
+        { id: "fri-2", time: "1:20 PM", aPlayers: "Andy Malinovich / Chris Loding", bPlayers: "Jeremy Smith / Scott Barnak" },
+        { id: "fri-3", time: "1:28 PM", aPlayers: "Patty Mihelich / Jonny Garcia", bPlayers: "Steve Seargeant / Chris Zale" },
+        { id: "fri-4", time: "1:36 PM", aPlayers: "Brandon Lietke / Rick Barnak", bPlayers: "Jason Collinsworth / Matt Poet" },
+        { id: "fri-5", time: "1:44 PM", aPlayers: "Chad Koch / Ken Mihelich", bPlayers: "Nathan Lietke / Dan Morrell" },
+        { id: "fri-6", time: "1:52 PM", aPlayers: "Steve Gordon / Marc Loding", bPlayers: "Chris Zale / Rob Juncaj" },
+        { id: "fri-7", time: "2:00 PM", aPlayers: "Jamie Gordon / Pat Stevens", bPlayers: "Steve Seargeant / Jason Collinsworth" }
+      ]
+    },
+    {
+      id: "sat_am",
+      name: "Saturday Morning Modified Alternate Shot",
+      format: "modified alternate shot (match play)",
+      matches: [
+        { id: "satm-1", time: "7:30 AM – Hole 1A", aPlayers: "Steve Gordon / Dave Santini", bPlayers: "Steve Seargeant / Nathan Lietke" },
+        { id: "satm-2", time: "7:30 AM – Hole 1B", aPlayers: "Marc Loding / Brandon Lietke", bPlayers: "Chris Zale / Rob Juncaj" },
+        { id: "satm-3", time: "7:30 AM – Hole 18A", aPlayers: "Chris Loding / Jamie Gordon", bPlayers: "Jason Collinsworth / Matt Poet" },
+        { id: "satm-4", time: "7:30 AM – Hole 18B", aPlayers: "Andy Malinovich / Ken Mihelich", bPlayers: "Troy Staten / Garett Urban" },
+        { id: "satm-5", time: "7:38 AM – Hole 1A", aPlayers: "Rick Barnak / Jonny Garcia", bPlayers: "Jeremy Smith / Scott Barnak" },
+        { id: "satm-6", time: "7:38 AM – Hole 1B", aPlayers: "Patty Mihelich / Chad Koch", bPlayers: "Dan Morrell / Chris Zale" },
+        { id: "satm-7", time: "7:38 AM – Hole 18A", aPlayers: "Pat Stevens / Kevin Dever", bPlayers: "Steve Seargeant / Nathan Lietke" }
+      ]
+    },
+    {
+      id: "sat_pm",
+      name: "Saturday Afternoon Singles",
+      format: "individual match play",
+      matches: [
+        { id: "sata-1", time: "1:04 PM", aPlayers: "Chris Loding", bPlayers: "Troy Staten" },
+        { id: "sata-2", time: "1:12 PM", aPlayers: "Andy Malinovich", bPlayers: "Chris Zale" },
+        { id: "sata-3", time: "1:20 PM", aPlayers: "Patty Mihelich", bPlayers: "Jason Collinsworth" },
+        { id: "sata-4", time: "1:28 PM", aPlayers: "Chad Koch", bPlayers: "Dan Morrell" },
+        { id: "sata-5", time: "1:36 PM", aPlayers: "Ken Mihelich", bPlayers: "Nathan Lietke" },
+        { id: "sata-6", time: "1:44 PM", aPlayers: "Brandon Lietke", bPlayers: "Matt Poet" },
+        { id: "sata-7", time: "1:52 PM", aPlayers: "Dave Santini", bPlayers: "Garett Urban" }
+      ]
+    }
+  ]
+};
+
+// -------------------------
+// Helpers
+// -------------------------
+
+function normalizeStrokeArray(arr) {
+  if (Array.isArray(arr) && arr.length === 18) return arr.map((v) => (v === "" || v == null ? "" : String(v)));
+  return Array(18).fill("");
+}
+
+function clampStrokeInput(val) {
+  const s = String(val ?? "").replace(/[^0-9]/g, "");
+  if (!s) return "";
+  const n = Math.max(1, Math.min(99, parseInt(s, 10)));
+  return String(n);
+}
+
+function lastNonEmptyIndex(arr) {
+  for (let i = (arr?.length || 0) - 1; i >= 0; i--) {
+    if (arr[i] !== "" && arr[i] != null) return i;
+  }
+  return -1;
+}
+
+function holesFromStrokes(strokesA, strokesB) {
+  const out = Array(18).fill("");
+  for (let i = 0; i < 18; i++) {
+    const a = parseInt(strokesA?.[i] ?? "", 10);
+    const b = parseInt(strokesB?.[i] ?? "", 10);
+    const aOk = Number.isFinite(a);
+    const bOk = Number.isFinite(b);
+    if (!aOk || !bOk) {
+      out[i] = "";
+      continue;
+    }
+    if (a < b) out[i] = "A";
+    else if (b < a) out[i] = "B";
+    else out[i] = "H";
+  }
+  return out;
+}
+
+function computeFromHoles(holes, teamA, teamB) {
+  let a = 0;
+  let b = 0;
+
+  for (let i = 0; i < 18; i++) {
+    const h = holes?.[i] || "";
+    if (h === "A") a += 1;
+    else if (h === "B") b += 1;
+
+    const played = i + 1;
+    const remaining = 18 - played;
+    const lead = Math.abs(a - b);
+
+    if (lead > remaining) {
+      const winner = a > b ? teamA : teamB;
+      const resultText = `${lead}&${remaining}`;
+      return { winner, resultText, status: `${winner} wins ${resultText}`, decidedAt: played, played, a, b, remaining };
+    }
+  }
+
+  const lastIdx = lastNonEmptyIndex(holes);
+  const played = Math.min(Math.max(lastIdx + 1, 0), 18);
+  const filledCount = (holes || []).filter((x) => x).length;
+
+  if (filledCount === 0) {
+    return { winner: "", resultText: "", status: "Not started", decidedAt: null, played: 0, a, b, remaining: 18 };
+  }
+
+  if (played >= 18 && holes.every((x) => x)) {
+    if (a === b) return { winner: "Halved", resultText: "AS", status: "All Square", decidedAt: 18, played: 18, a, b, remaining: 0 };
+    const winner = a > b ? teamA : teamB;
+    const lead = Math.abs(a - b);
+    const resultText = lead === 1 ? "1UP" : `${lead}UP`;
+    return { winner, resultText, status: `${winner} wins ${resultText}`, decidedAt: 18, played: 18, a, b, remaining: 0 };
+  }
+
+  if (a === b) {
+    return { winner: "", resultText: "", status: `AS thru ${played}`, decidedAt: null, played, a, b, remaining: 18 - played };
+  }
+
+  const leader = a > b ? teamA : teamB;
+  const lead = Math.abs(a - b);
+  return { winner: "", resultText: "", status: `${leader} ${lead}UP thru ${played}`, decidedAt: null, played, a, b, remaining: 18 - played };
+}
+
+function computeFromStrokes(strokesA, strokesB, teamA, teamB, legacyHoles) {
+  const anyStroke = (strokesA || []).some((x) => x !== "") || (strokesB || []).some((x) => x !== "");
+  const holes = anyStroke ? holesFromStrokes(strokesA, strokesB) : (legacyHoles || Array(18).fill(""));
+  const comp = computeFromHoles(holes, teamA, teamB);
+  return { ...comp, holes };
+}
+
+function winnerToPoints(winner, teamA, teamB) {
+  if (winner === teamA) return { a: 1, b: 0 };
+  if (winner === teamB) return { a: 0, b: 1 };
+  if (winner === "Halved") return { a: 0.5, b: 0.5 };
+  return { a: 0, b: 0 };
+}
+
+function formatPoints(n) {
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(1);
+}
+
+function splitPlayers(str) {
+  const re = new RegExp("\s*(?:/|&|,|\+)\s*", "g");
+  return String(str || "")
+    .split(re)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function ensureMatchDefaults(m) {
+  const strokesA = normalizeStrokeArray(m.strokesA);
+  const strokesB = normalizeStrokeArray(m.strokesB);
+  const legacyHoles = Array.isArray(m.holes) && m.holes.length === 18 ? m.holes : null;
+  return {
+    winner: "",
+    resultText: "",
+    notes: "",
+    autoFromHoles: true,
+    strokesA,
+    strokesB,
+    holes: legacyHoles,
+    aPlayers: m.aPlayers ?? "",
+    bPlayers: m.bPlayers ?? "",
+    aPlayerIds: Array.isArray(m.aPlayerIds) ? m.aPlayerIds : [],
+    bPlayerIds: Array.isArray(m.bPlayerIds) ? m.bPlayerIds : [],
+    ...m
+  };
+}
+
+function hydrateDefaults(base) {
+  return {
+    ...base,
+    roster: base.roster || { A: [], B: [] },
+    sessions: base.sessions.map((s) => ({
+      ...s,
+      matches: s.matches.map((m) => ensureMatchDefaults(m))
+    }))
+  };
+}
+
+function pick(obj, keys) {
+  const out = {};
+  for (const k of keys) if (k in obj) out[k] = obj[k];
+  return out;
+}
+
+function downloadFile(filename, mime, content) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function toCsv(rows) {
+  const esc = (v) => {
+    const s = v == null ? "" : String(v);
+    if (/[\",
+]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  return rows.map((r) => r.map(esc).join(",")).join("
+");
+}
+
+function toSpreadsheetXml(rows) {
+  const xmlEsc = (s) =>
+    String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+
+  const rowXml = rows
+    .map((r) => `<Row>${r.map((c) => `<Cell><Data ss:Type=\"String\">${xmlEsc(c)}</Data></Cell>`).join("")}</Row>`)
+    .join("");
+
+  return `<?xml version=\"1.0\"?>
+<?mso-application progid=\"Excel.Sheet\"?>
+<Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\"
+ xmlns:o=\"urn:schemas-microsoft-com:office:office\"
+ xmlns:x=\"urn:schemas-microsoft-com:office:excel\"
+ xmlns:ss=\"urn:schemas-microsoft-com:office:spreadsheet\">
+  <Worksheet ss:Name=\"Results\">
+    <Table>
+      ${rowXml}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+}
+
+function safeB64EncodeUnicode(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+function safeB64DecodeUnicode(b64) {
+  return decodeURIComponent(escape(atob(b64)));
+}
+
+function buildShareLink(state) {
+  const payload = safeB64EncodeUnicode(JSON.stringify(state));
+  const base = `${window.location.origin}${window.location.pathname}`;
+  return `${base}#s=${payload}`;
+}
+
+function parseShareHash() {
+  const h = window.location.hash || "";
+  if (!h.startsWith("#s=")) return null;
+  const payload = h.slice(3);
+  if (!payload) return null;
+  try {
+    const json = safeB64DecodeUnicode(payload);
+    const obj = JSON.parse(json);
+    return obj;
+  } catch {
+    return null;
+  }
+}
+
+function qrUrlFor(text) {
+  // External QR image generator
+  const size = "240x240";
+  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}&data=${encodeURIComponent(text)}`;
+}
+
+// -------------------------
+// UI primitives
+// -------------------------
+
+function Card({ children, className = "" }) {
+  return <div className={`rounded-2xl border border-black/10 bg-white shadow-sm dark:bg-zinc-900 dark:border-white/10 ${className}`}>{children}</div>;
+}
+
+function Badge({ children, tone = "neutral" }) {
+  const cls =
+    tone === "a"
+      ? "bg-yellow-100 text-black border-yellow-200 dark:bg-yellow-300/20 dark:text-yellow-200 dark:border-yellow-300/30"
+      : tone === "b"
+      ? "bg-blue-100 text-blue-900 border-blue-200 dark:bg-blue-400/15 dark:text-blue-200 dark:border-blue-300/30"
+      : tone === "good"
+      ? "bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-400/10 dark:text-emerald-200 dark:border-emerald-300/20"
+      : tone === "warn"
+      ? "bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-400/10 dark:text-amber-200 dark:border-amber-300/20"
+      : "bg-gray-50 text-gray-700 border-gray-200 dark:bg-white/5 dark:text-gray-200 dark:border-white/10";
+  return <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${cls}`}>{children}</span>;
+}
+
+function IconButton({ onClick, children, title, primary = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={
+        "px-3 py-2 rounded-xl border text-sm transition focus:outline-none focus:ring-2 focus:ring-black/10 dark:focus:ring-white/10 " +
+        (primary
+          ? "bg-black text-white border-black hover:bg-black/90 dark:bg-white dark:text-black dark:border-white"
+          : "bg-white hover:bg-gray-50 border-black/10 dark:bg-zinc-900 dark:hover:bg-white/5 dark:border-white/10")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+function SegButton({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "px-3 py-1.5 text-sm rounded-lg border transition focus:outline-none focus:ring-2 focus:ring-black/10 dark:focus:ring-white/10 " +
+        (active
+          ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+          : "bg-white hover:bg-gray-50 border-black/10 dark:bg-zinc-900 dark:hover:bg-white/5 dark:border-white/10")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+function TopBar({ title, subtitle, right }) {
+  return (
+    <div className="sticky top-0 z-10 -mx-4 sm:-mx-6 px-4 sm:px-6 py-4 bg-white/70 backdrop-blur border-b border-black/10 dark:bg-zinc-950/60 dark:border-white/10">
+      <div className="max-w-6xl mx-auto flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight dark:text-white">{title}</h1>
+          {subtitle ? <p className="text-sm text-gray-600 mt-1 dark:text-gray-300">{subtitle}</p> : null}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">{right}</div>
+      </div>
+    </div>
+  );
+}
+
+function TeamThemeStyles() {
+  return (
+    <style>{`
+      .teamA-text{ color:#111827; }
+      .teamB-text{ color:#1d4ed8; }
+      .dark .teamA-text{ color:#fbbf24; }
+      .dark .teamB-text{ color:#93c5fd; }
+
+      @media print {
+        button { display: none !important; }
+        body { background: white !important; }
+      }
+    `}</style>
+  );
+}
+
+// -------------------------
+// App
+// -------------------------
+
+export default function App() {
+  const [data, setData] = useState(() => hydrateDefaults(DEFAULT_DATA));
+  const [activeSessionId, setActiveSessionId] = useState(DEFAULT_DATA.sessions[0].id);
+  const [expandedMatchId, setExpandedMatchId] = useState(null);
+  const [view, setView] = useState("app"); // app | scoreboard | players | roster | scorekeeper
+
+  const [darkMode, setDarkMode] = useState(() => {
+    try {
+      const v = localStorage.getItem(DARK_KEY);
+      return v ? v === "1" : false;
+    } catch {
+      return false;
+    }
+  });
+
+  // Dark mode
+  useEffect(() => {
+    try {
+      localStorage.setItem(DARK_KEY, darkMode ? "1" : "0");
+    } catch {}
+    const root = document.documentElement;
+    if (darkMode) root.classList.add("dark");
+    else root.classList.remove("dark");
+  }, [darkMode]);
+
+  // Import from share hash if present (one-time)
+  useEffect(() => {
+    const imported = parseShareHash();
+    if (!imported) return;
+
+    // Soft import: only if user confirms
+    // (No confirm prompt requirement; we just apply once and toast.)
+    setData((prev) => {
+      try {
+        const merged = hydrateDefaults({
+          ...prev,
+          ...pick(imported, ["teams", "roster", "sessions"])
+        });
+        return merged;
+      } catch {
+        return prev;
+      }
+    });
+    toast("Imported scoreboard from link");
+
+    // Clear hash to avoid re-import loops
+    try {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Load persisted state
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (!saved?.sessions?.length) return;
+      setData((prev) => {
+        const merged = hydrateDefaults({
+          ...prev,
+          ...pick(saved, ["teams", "roster", "sessions"])
+        });
+        // Keep default schedule order; merge match state by id
+        const byId = new Map();
+        for (const s of merged.sessions) for (const m of s.matches || []) byId.set(m.id, m);
+        const rebuilt = {
+          ...merged,
+          sessions: prev.sessions.map((s) => ({
+            ...s,
+            matches: s.matches.map((m) => {
+              const sm = byId.get(m.id);
+              return sm
+                ? ensureMatchDefaults({
+                    ...m,
+                    ...pick(sm, [
+                      "winner",
+                      "resultText",
+                      "notes",
+                      "autoFromHoles",
+                      "strokesA",
+                      "strokesB",
+                      "holes",
+                      "aPlayers",
+                      "bPlayers",
+                      "aPlayerIds",
+                      "bPlayerIds"
+                    ])
+                  })
+                : ensureMatchDefaults(m);
+            })
+          }))
+        };
+        return rebuilt;
+      });
+    } catch {}
+  }, []);
+
+  // Persist
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch {}
+  }, [data]);
+
+  const [teamA, teamB] = data.teams;
+
+  const activeSession = useMemo(
+    () => data.sessions.find((s) => s.id === activeSessionId) || data.sessions[0],
+    [data.sessions, activeSessionId]
+  );
+
+  const computedMatches = useMemo(() => {
+    const map = new Map();
+    for (const s of data.sessions) {
+      for (const mRaw of s.matches) {
+        const m = ensureMatchDefaults(mRaw);
+        map.set(m.id, computeFromStrokes(m.strokesA, m.strokesB, teamA, teamB, m.holes));
+      }
+    }
+    return map;
+  }, [data.sessions, teamA, teamB]);
+
+  const totals = useMemo(() => {
+    let aTot = 0;
+    let bTot = 0;
+    const sessionTotals = {};
+
+    for (const s of data.sessions) {
+      let sa = 0;
+      let sb = 0;
+      for (const mRaw of s.matches) {
+        const m = ensureMatchDefaults(mRaw);
+        const auto = computedMatches.get(m.id);
+        const effectiveWinner = m.autoFromHoles && auto?.winner ? auto.winner : m.winner;
+        const p = winnerToPoints(effectiveWinner, teamA, teamB);
+        sa += p.a;
+        sb += p.b;
+      }
+      sessionTotals[s.id] = { a: sa, b: sb };
+      aTot += sa;
+      bTot += sb;
+    }
+
+    return { a: aTot, b: bTot, sessionTotals };
+  }, [data.sessions, computedMatches, teamA, teamB]);
+
+  const leaderLabel = totals.a === totals.b ? "Overall tied" : `${totals.a > totals.b ? teamA : teamB} leads`;
+
+  const playerRecords = useMemo(() => {
+    const rec = new Map();
+    const bump = (name, side, outcome, pts) => {
+      const key = String(name || "").trim();
+      if (!key) return;
+      const cur = rec.get(key) || { name: key, side, w: 0, l: 0, h: 0, pts: 0, matches: 0 };
+      cur.side = side;
+      cur.matches += 1;
+      cur.pts += pts;
+      if (outcome === "W") cur.w += 1;
+      else if (outcome === "L") cur.l += 1;
+      else cur.h += 1;
+      rec.set(key, cur);
+    };
+
+    for (const s of data.sessions) {
+      for (const mRaw of s.matches) {
+        const m = ensureMatchDefaults(mRaw);
+        const auto = computedMatches.get(m.id);
+        const effectiveWinner = m.autoFromHoles && auto?.winner ? auto.winner : m.winner;
+        if (!effectiveWinner) continue;
+
+        const aPlayers = splitPlayers(m.aPlayers);
+        const bPlayers = splitPlayers(m.bPlayers);
+
+        if (effectiveWinner === "Halved") {
+          for (const p of aPlayers) bump(p, "A", "H", 0.5);
+          for (const p of bPlayers) bump(p, "B", "H", 0.5);
+        } else {
+          const aWon = effectiveWinner === teamA;
+          for (const p of aPlayers) bump(p, "A", aWon ? "W" : "L", aWon ? 1 : 0);
+          for (const p of bPlayers) bump(p, "B", aWon ? "L" : "W", aWon ? 0 : 1);
+        }
+      }
+    }
+
+    const list = Array.from(rec.values());
+    list.sort((x, y) => (y.pts - x.pts) || (y.w - x.w) || x.name.localeCompare(y.name));
+    return list;
+  }, [data.sessions, computedMatches, teamA, teamB]);
+
+  // Flattened match list for scorekeeper mode
+  const allMatchesFlat = useMemo(() => {
+    const out = [];
+    for (const s of data.sessions) {
+      for (const mRaw of s.matches) out.push({ sessionId: s.id, sessionName: s.name, sessionFormat: s.format, match: ensureMatchDefaults(mRaw) });
+    }
+    return out;
+  }, [data.sessions]);
+
+  // -------------------------
+  // State updates
+  // -------------------------
+
+  function updateMatch(matchId, patch) {
+    setData((prev) => ({
+      ...prev,
+      sessions: prev.sessions.map((s) => ({
+        ...s,
+        matches: s.matches.map((m) => (m.id === matchId ? ensureMatchDefaults({ ...m, ...patch }) : m))
+      }))
+    }));
+  }
+
+  function updateRoster(side, nextRoster) {
+    setData((prev) => ({
+      ...prev,
+      roster: {
+        ...prev.roster,
+        [side]: nextRoster
+      }
+    }));
+  }
+
+  function resetAll() {
+    setExpandedMatchId(null);
+    setData((prev) => ({
+      ...prev,
+      sessions: prev.sessions.map((s) => ({
+        ...s,
+        matches: s.matches.map((m) =>
+          ensureMatchDefaults({
+            ...m,
+            winner: "",
+            resultText: "",
+            notes: "",
+            strokesA: Array(18).fill(""),
+            strokesB: Array(18).fill(""),
+            autoFromHoles: true
+          })
+        )
+      }))
+    }));
+    toast("Reset complete");
+  }
+
+  // -------------------------
+  // Export
+  // -------------------------
+
+  function exportRows() {
+    const header = [
+      "Session",
+      "Match ID",
+      "Tee",
+      teamA,
+      teamB,
+      "Auto",
+      "Winner",
+      "Result",
+      "Status",
+      `${teamA} strokes (1-18)`,
+      `${teamB} strokes (1-18)`,
+      "Hole winners (A/B/H)",
+      "Notes"
+    ];
+
+    const rows = [header];
+
+    for (const s of data.sessions) {
+      for (const mRaw of s.matches) {
+        const m = ensureMatchDefaults(mRaw);
+        const auto = computedMatches.get(m.id);
+        const effectiveWinner = m.autoFromHoles && auto?.winner ? auto.winner : m.winner;
+        const effectiveResult = m.autoFromHoles && auto?.resultText ? auto.resultText : (m.resultText || "");
+        const status = m.autoFromHoles ? (auto?.status || "") : "Manual";
+
+        rows.push([
+          s.name,
+          m.id,
+          m.time,
+          m.aPlayers,
+          m.bPlayers,
+          m.autoFromHoles ? "Yes" : "No",
+          effectiveWinner,
+          effectiveResult,
+          status,
+          (m.strokesA || []).join("|"),
+          (m.strokesB || []).join("|"),
+          (auto?.holes || []).join("|"),
+          m.notes || ""
+        ]);
+      }
+    }
+
+    return rows;
+  }
+
+  function exportCsv() {
+    downloadFile(`lietke-ryder-cup-results-${new Date().toISOString().slice(0, 10)}.csv`, "text/csv;charset=utf-8", toCsv(exportRows()));
+    toast("CSV downloaded");
+  }
+
+  function exportExcel() {
+    downloadFile(`lietke-ryder-cup-results-${new Date().toISOString().slice(0, 10)}.xls`, "application/vnd.ms-excel", toSpreadsheetXml(exportRows()));
+    toast("Excel downloaded");
+  }
+
+  // -------------------------
+  // Views
+  // -------------------------
+
+  if (view === "roster") {
+    return (
+      <RosterView
+        teamA={teamA}
+        teamB={teamB}
+        roster={data.roster}
+        onUpdateRoster={updateRoster}
+        onBack={() => setView("app")}
+        darkMode={darkMode}
+        onToggleDark={() => setDarkMode((v) => !v)}
+      />
+    );
+  }
+
+  if (view === "players") {
+    return (
+      <PlayersView
+        teamA={teamA}
+        teamB={teamB}
+        playerRecords={playerRecords}
+        onBack={() => setView("app")}
+        darkMode={darkMode}
+        onToggleDark={() => setDarkMode((v) => !v)}
+      />
+    );
+  }
+
+  if (view === "scoreboard") {
+    const shareLink = buildShareLink(data);
+    return (
+      <ScoreboardView
+        data={data}
+        teamA={teamA}
+        teamB={teamB}
+        totals={totals}
+        computedMatches={computedMatches}
+        leaderLabel={leaderLabel}
+        shareLink={shareLink}
+        onBack={() => setView("app")}
+        darkMode={darkMode}
+        onToggleDark={() => setDarkMode((v) => !v)}
+      />
+    );
+  }
+
+  if (view === "scorekeeper") {
+    return (
+      <ScorekeeperView
+        teamA={teamA}
+        teamB={teamB}
+        allMatches={allMatchesFlat}
+        computedMatches={computedMatches}
+        onUpdateMatch={updateMatch}
+        onBack={() => setView("app")}
+        darkMode={darkMode}
+        onToggleDark={() => setDarkMode((v) => !v)}
+      />
+    );
+  }
+
+  // -------------------------
+  // Main app view
+  // -------------------------
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white text-gray-900 dark:from-zinc-950 dark:to-black dark:text-white">
+      <TopBar
+        title="Lietke Ryder Cup"
+        subtitle="Match play • raw strokes by hole • auto status"
+        right={
+          <>
+            <IconButton onClick={() => setView("scoreboard")}>Scoreboard</IconButton>
+            <IconButton onClick={() => setView("scorekeeper")}>Scorekeeper</IconButton>
+            <IconButton onClick={() => setView("players")}>Players</IconButton>
+            <IconButton onClick={() => setView("roster")}>Roster</IconButton>
+            <IconButton onClick={exportCsv}>Export CSV</IconButton>
+            <IconButton onClick={exportExcel}>Export Excel</IconButton>
+            <IconButton onClick={() => setDarkMode((v) => !v)}>{darkMode ? "Light" : "Dark"}</IconButton>
+            <IconButton onClick={resetAll}>Reset</IconButton>
+          </>
+        }
+      />
+
+      <div className="max-w-6xl mx-auto p-4 sm:p-6">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <Card className="lg:col-span-2 p-4 sm:p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm text-gray-600 dark:text-gray-300">Overall</div>
+                <div className="mt-1 flex items-baseline gap-3 flex-wrap">
+                  <div className="text-2xl font-semibold tracking-tight"><span className="teamA-text">{teamA}</span>: {formatPoints(totals.a)}</div>
+                  <div className="text-2xl font-semibold tracking-tight"><span className="teamB-text">{teamB}</span>: {formatPoints(totals.b)}</div>
+                </div>
+              </div>
+              <Badge tone={totals.a === totals.b ? "neutral" : "good"}>{leaderLabel}</Badge>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {data.sessions.map((s) => {
+                const st = totals.sessionTotals[s.id];
+                const active = activeSessionId === s.id;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveSessionId(s.id);
+                      setExpandedMatchId(null);
+                    }}
+                    className={
+                      "text-left rounded-2xl border p-3 transition focus:outline-none focus:ring-2 focus:ring-black/10 dark:focus:ring-white/10 " +
+                      (active
+                        ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                        : "bg-white hover:bg-gray-50 border-black/10 dark:bg-zinc-900 dark:hover:bg-white/5 dark:border-white/10")
+                    }
+                  >
+                    <div className="text-sm font-medium">{s.name}</div>
+                    <div className={"text-xs mt-0.5 " + (active ? "text-gray-200 dark:text-gray-700" : "text-gray-600 dark:text-gray-300")}>{s.format}</div>
+                    <div className="mt-2 text-sm"><span className="font-semibold">{formatPoints(st.a)}</span><span className="text-gray-500 dark:text-gray-400"> – </span><span className="font-semibold">{formatPoints(st.b)}</span></div>
+                  </button>
+                );
+              })}
+            </div>
+          </Card>
+
+          <Card className="p-4 sm:p-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="text-lg font-semibold tracking-tight">Team themes</div>
+                <div className="text-sm text-gray-600 dark:text-gray-300">Cobra Kai + Lombardo</div>
+              </div>
+              <Badge>Win=1</Badge>
+            </div>
+            <div className="mt-4 space-y-3">
+              <div className="rounded-2xl border border-black/10 bg-gray-50 p-3 dark:bg-white/5 dark:border-white/10">
+                <div className="flex items-center justify-between"><div className="font-semibold teamA-text">{teamA}</div><Badge tone="a">Black / Yellow</Badge></div>
+              </div>
+              <div className="rounded-2xl border border-black/10 bg-gray-50 p-3 dark:bg-white/5 dark:border-white/10">
+                <div className="flex items-center justify-between"><div className="font-semibold teamB-text">{teamB}</div><Badge tone="b">Blue / White</Badge></div>
+              </div>
+            </div>
+            <div className="mt-4 text-sm text-gray-700 dark:text-gray-200">Open a match’s <b>Strokes</b> panel for <b>Quick Entry</b>, or use <b>Scorekeeper</b> on mobile.</div>
+          </Card>
+        </div>
+
+        <Card className="mt-6 p-4 sm:p-5">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold tracking-tight">{activeSession.name}</h2>
+              <div className="text-sm text-gray-600 dark:text-gray-300">{activeSession.format}</div>
+            </div>
+            <div className="text-sm">Session: <span className="font-semibold">{formatPoints(totals.sessionTotals[activeSession.id]?.a || 0)}</span><span className="text-gray-400"> – </span><span className="font-semibold">{formatPoints(totals.sessionTotals[activeSession.id]?.b || 0)}</span></div>
+          </div>
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="min-w-full border-separate" style={{ borderSpacing: "0 10px" }}>
+              <thead>
+                <tr className="text-left text-xs text-gray-600 dark:text-gray-300">
+                  <th className="px-3">Tee</th>
+                  <th className="px-3">{teamA}</th>
+                  <th className="px-3">{teamB}</th>
+                  <th className="px-3">Controls</th>
+                  <th className="px-3">Winner</th>
+                  <th className="px-3">Result</th>
+                  <th className="px-3">Status</th>
+                  <th className="px-3 text-right">Pts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeSession.matches.map((mRaw) => {
+                  const m = ensureMatchDefaults(mRaw);
+                  const auto = computedMatches.get(m.id);
+                  const effectiveWinner = m.autoFromHoles && auto?.winner ? auto.winner : m.winner;
+                  const p = winnerToPoints(effectiveWinner, teamA, teamB);
+
+                  return (
+                    <React.Fragment key={m.id}>
+                      <MatchRow
+                        teamA={teamA}
+                        teamB={teamB}
+                        rosterA={data.roster?.A || []}
+                        rosterB={data.roster?.B || []}
+                        match={m}
+                        auto={auto}
+                        points={p}
+                        status={m.autoFromHoles ? (auto?.status || "") : "Manual"}
+                        onToggleExpand={() => setExpandedMatchId((cur) => (cur === m.id ? null : m.id))}
+                        expanded={expandedMatchId === m.id}
+                        onUpdate={updateMatch}
+                      />
+
+                      {expandedMatchId === m.id ? (
+                        <tr className="bg-transparent"><td colSpan={8} className="px-3 pb-4">
+                          <StrokesEditor
+                            teamA={teamA}
+                            teamB={teamB}
+                            strokesA={m.strokesA}
+                            strokesB={m.strokesB}
+                            onChange={(strokesA, strokesB) => updateMatch(m.id, { strokesA, strokesB })}
+                            onClear={() => updateMatch(m.id, { strokesA: Array(18).fill(""), strokesB: Array(18).fill("") })}
+                          />
+                        </td></tr>
+                      ) : null}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">Auto mode uses strokes to compute hole winners, match status, and final result.</div>
+        </Card>
+
+        <footer className="mt-10 pb-10 text-xs text-gray-500 dark:text-gray-400">Tip: Use <b>Roster</b> to update names once, then pick players quickly per match.</footer>
+      </div>
+
+      <TeamThemeStyles />
+    </div>
+  );
+}
+
+// -------------------------
+// Views
+// -------------------------
+
+function PlayersView({ teamA, teamB, playerRecords, onBack, darkMode, onToggleDark }) {
+  const aList = playerRecords.filter((p) => p.side === "A");
+  const bList = playerRecords.filter((p) => p.side === "B");
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white text-gray-900 dark:from-zinc-950 dark:to-black dark:text-white">
+      <TopBar
+        title="Player Records"
+        subtitle="W / L / H and points contributed"
+        right={
+          <>
+            <IconButton onClick={onBack}>Back</IconButton>
+            <IconButton onClick={onToggleDark}>{darkMode ? "Light" : "Dark"}</IconButton>
+          </>
+        }
+      />
+
+      <div className="max-w-6xl mx-auto p-4 sm:p-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <PlayersTable title={teamA} tone="a" rows={aList} />
+          <PlayersTable title={teamB} tone="b" rows={bList} />
+        </div>
+
+        <Card className="mt-4 p-4 sm:p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-lg font-semibold tracking-tight">Overall leaderboard</div>
+              <div className="text-sm text-gray-600 dark:text-gray-300">Sorted by points, then wins</div>
+            </div>
+            <Badge>{playerRecords.length} players</Badge>
+          </div>
+          <div className="mt-3 overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-gray-600 dark:text-gray-300 border-b border-black/10 dark:border-white/10">
+                  <th className="py-2 pr-3">Player</th>
+                  <th className="py-2 pr-3">Team</th>
+                  <th className="py-2 pr-3">W</th>
+                  <th className="py-2 pr-3">L</th>
+                  <th className="py-2 pr-3">H</th>
+                  <th className="py-2 pr-3">Pts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {playerRecords.map((p) => (
+                  <tr key={p.name} className="border-b border-black/5 dark:border-white/10 last:border-b-0">
+                    <td className="py-2 pr-3 font-medium">{p.name}</td>
+                    <td className="py-2 pr-3">{p.side === "A" ? <Badge tone="a">{teamA}</Badge> : <Badge tone="b">{teamB}</Badge>}</td>
+                    <td className="py-2 pr-3">{p.w}</td>
+                    <td className="py-2 pr-3">{p.l}</td>
+                    <td className="py-2 pr-3">{p.h}</td>
+                    <td className="py-2 pr-3 font-semibold">{formatPoints(p.pts)}</td>
+                  </tr>
+                ))}
+                {!playerRecords.length ? (
+                  <tr><td colSpan={6} className="py-4 text-sm text-gray-600 dark:text-gray-300">No completed matches yet.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>
+      <TeamThemeStyles />
+    </div>
+  );
+}
+
+function RosterView({ teamA, teamB, roster, onUpdateRoster, onBack, darkMode, onToggleDark }) {
+  const [newA, setNewA] = useState("");
+  const [newB, setNewB] = useState("");
+
+  const rosterA = roster?.A || [];
+  const rosterB = roster?.B || [];
+
+  function add(side) {
+    const name = (side === "A" ? newA : newB).trim();
+    if (!name) return;
+    const list = (side === "A" ? rosterA : rosterB).slice();
+    if (!list.some((x) => x.toLowerCase() === name.toLowerCase())) list.push(name);
+    onUpdateRoster(side, list);
+    side === "A" ? setNewA("") : setNewB("");
+    toast("Added to roster");
+  }
+
+  function updateName(side, idx, val) {
+    const list = (side === "A" ? rosterA : rosterB).slice();
+    list[idx] = val;
+    onUpdateRoster(side, list);
+  }
+
+  function remove(side, idx) {
+    const list = (side === "A" ? rosterA : rosterB).slice();
+    list.splice(idx, 1);
+    onUpdateRoster(side, list);
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white text-gray-900 dark:from-zinc-950 dark:to-black dark:text-white">
+      <TopBar
+        title="Roster"
+        subtitle="Edit player names once, then pick them quickly per matchup"
+        right={
+          <>
+            <IconButton onClick={onBack}>Back</IconButton>
+            <IconButton onClick={onToggleDark}>{darkMode ? "Light" : "Dark"}</IconButton>
+          </>
+        }
+      />
+
+      <div className="max-w-6xl mx-auto p-4 sm:p-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <RosterPanel
+            title={teamA}
+            tone="a"
+            list={rosterA}
+            newValue={newA}
+            setNewValue={setNewA}
+            onAdd={() => add("A")}
+            onUpdate={(idx, val) => updateName("A", idx, val)}
+            onRemove={(idx) => remove("A", idx)}
+          />
+
+          <RosterPanel
+            title={teamB}
+            tone="b"
+            list={rosterB}
+            newValue={newB}
+            setNewValue={setNewB}
+            onAdd={() => add("B")}
+            onUpdate={(idx, val) => updateName("B", idx, val)}
+            onRemove={(idx) => remove("B", idx)}
+          />
+        </div>
+
+        <Card className="mt-4 p-4 sm:p-5">
+          <div className="text-sm text-gray-700 dark:text-gray-200">
+            Tip: You can still free-type names inside a match row — roster is just for speed + consistency.
+          </div>
+        </Card>
+      </div>
+
+      <TeamThemeStyles />
+    </div>
+  );
+}
+
+function ScoreboardView({ data, teamA, teamB, totals, computedMatches, leaderLabel, shareLink, onBack, darkMode, onToggleDark }) {
+  async function share() {
+    const leader = totals.a === totals.b ? "Tied" : totals.a > totals.b ? teamA : teamB;
+    const text = `Lietke Ryder Cup scoreboard
+
+${teamA}: ${formatPoints(totals.a)}
+${teamB}: ${formatPoints(totals.b)}
+${leader === "Tied" ? "Overall: Tied" : `Overall: ${leader} leads`}
+
+Share link:
+${shareLink}`;
+
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "Lietke Ryder Cup Scoreboard", text, url: shareLink });
+        return;
+      }
+    } catch {}
+
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied scoreboard + link");
+    } catch {
+      alert(text);
+    }
+  }
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      toast("Link copied");
+    } catch {
+      toast("Copy failed");
+    }
+  }
+
+  const qr = qrUrlFor(shareLink);
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white text-gray-900 dark:from-zinc-950 dark:to-black dark:text-white">
+      <TopBar
+        title="Scoreboard"
+        subtitle="Print or share (includes QR + link)"
+        right={
+          <>
+            <IconButton onClick={onBack}>Back</IconButton>
+            <IconButton onClick={share}>Share</IconButton>
+            <IconButton onClick={copyLink}>Copy link</IconButton>
+            <IconButton onClick={() => window.print()}>Print</IconButton>
+            <IconButton onClick={onToggleDark}>{darkMode ? "Light" : "Dark"}</IconButton>
+          </>
+        }
+      />
+
+      <div className="max-w-5xl mx-auto p-4 sm:p-6">
+        <Card className="p-4 sm:p-5">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+            <div className="flex-1">
+              <div className="text-sm text-gray-600 dark:text-gray-300">Overall score</div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight">
+                <span className="teamA-text">{teamA}</span>: {formatPoints(totals.a)} <span className="text-gray-300 dark:text-gray-700">–</span> <span className="teamB-text">{teamB}</span>: {formatPoints(totals.b)}
+              </div>
+              <div className="mt-2"><Badge tone={totals.a === totals.b ? "neutral" : "good"}>{leaderLabel}</Badge></div>
+
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {data.sessions.map((s) => {
+                  const st = totals.sessionTotals[s.id];
+                  return (
+                    <div key={s.id} className="rounded-2xl border border-black/10 bg-gray-50 p-3 dark:bg-white/5 dark:border-white/10">
+                      <div className="text-sm font-medium">{s.name}</div>
+                      <div className="text-xs text-gray-600 mt-0.5 dark:text-gray-300">{s.format}</div>
+                      <div className="mt-2 text-sm">
+                        <span className="font-semibold">{formatPoints(st.a)}</span>
+                        <span className="text-gray-500 dark:text-gray-400"> – </span>
+                        <span className="font-semibold">{formatPoints(st.b)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="w-full lg:w-[280px]">
+              <div className="rounded-2xl border border-black/10 bg-gray-50 p-3 dark:bg-white/5 dark:border-white/10">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">Share QR</div>
+                  <Badge>Import link</Badge>
+                </div>
+                <div className="mt-3 flex items-center justify-center">
+                  <img src={qr} alt="QR code for scoreboard" className="h-[240px] w-[240px] rounded-xl bg-white p-2" />
+                </div>
+                <div className="mt-3 text-xs text-gray-600 dark:text-gray-300 break-all">{shareLink}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-6 space-y-6">
+            {data.sessions.map((s) => (
+              <div key={s.id} className="break-inside-avoid">
+                <div className="flex items-baseline justify-between">
+                  <h2 className="text-lg font-semibold">{s.name}</h2>
+                  <div className="text-sm text-gray-700 dark:text-gray-200">
+                    {formatPoints(totals.sessionTotals[s.id].a)} – {formatPoints(totals.sessionTotals[s.id].b)}
+                  </div>
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-300">{s.format}</div>
+
+                <div className="mt-3 overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-600 dark:text-gray-300 border-b border-black/10 dark:border-white/10">
+                        <th className="py-2 pr-3">Tee</th>
+                        <th className="py-2 pr-3">{teamA}</th>
+                        <th className="py-2 pr-3">{teamB}</th>
+                        <th className="py-2 pr-3">Result</th>
+                        <th className="py-2 pr-3">Point</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {s.matches.map((mRaw) => {
+                        const m = ensureMatchDefaults(mRaw);
+                        const auto = computedMatches.get(m.id);
+                        const effectiveWinner = m.autoFromHoles && auto?.winner ? auto.winner : m.winner;
+                        const effectiveResult = m.autoFromHoles && auto?.resultText ? auto.resultText : (m.resultText || "");
+                        const p = winnerToPoints(effectiveWinner, teamA, teamB);
+                        return (
+                          <tr key={m.id} className="border-b border-black/5 dark:border-white/10 last:border-b-0">
+                            <td className="py-2 pr-3 whitespace-nowrap">{m.time}</td>
+                            <td className="py-2 pr-3">{m.aPlayers}</td>
+                            <td className="py-2 pr-3">{m.bPlayers}</td>
+                            <td className="py-2 pr-3">{effectiveWinner ? `${effectiveWinner} ${effectiveResult}` : (m.autoFromHoles ? (auto?.status || "Pending") : "Pending")}</td>
+                            <td className="py-2 pr-3 whitespace-nowrap">{formatPoints(p.a)}–{formatPoints(p.b)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 text-xs text-gray-500 dark:text-gray-400">Win=1, Halved=0.5 each • Generated {new Date().toLocaleString()}.</div>
+        </Card>
+      </div>
+
+      <TeamThemeStyles />
+    </div>
+  );
+}
+
+function ScorekeeperView({ teamA, teamB, allMatches, computedMatches, onUpdateMatch, onBack, darkMode, onToggleDark }) {
+  const [idx, setIdx] = useState(0);
+
+  const current = allMatches[Math.min(Math.max(idx, 0), Math.max(allMatches.length - 1, 0))];
+  const m = current?.match;
+  const auto = m ? computedMatches.get(m.id) : null;
+
+  useEffect(() => {
+    // reset if matches shrink
+    setIdx((i) => Math.min(i, Math.max(allMatches.length - 1, 0)));
+  }, [allMatches.length]);
+
+  if (!m) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white text-gray-900 dark:from-zinc-950 dark:to-black dark:text-white">
+        <TopBar
+          title="Scorekeeper"
+          subtitle="Mobile-first scoring"
+          right={
+            <>
+              <IconButton onClick={onBack}>Back</IconButton>
+              <IconButton onClick={onToggleDark}>{darkMode ? "Light" : "Dark"}</IconButton>
+            </>
+          }
+        />
+        <div className="max-w-3xl mx-auto p-4 sm:p-6">
+          <Card className="p-4 sm:p-5">No matches found.</Card>
+        </div>
+        <TeamThemeStyles />
+      </div>
+    );
+  }
+
+  const strokesA = normalizeStrokeArray(m.strokesA);
+  const strokesB = normalizeStrokeArray(m.strokesB);
+  const holes = holesFromStrokes(strokesA, strokesB);
+  const quickStart = Math.min(Math.max(Math.max(lastNonEmptyIndex(strokesA), lastNonEmptyIndex(strokesB)) + 1, 1), 18);
+  const [hole, setHole] = useState(quickStart);
+
+  useEffect(() => {
+    const next = Math.min(Math.max(Math.max(lastNonEmptyIndex(strokesA), lastNonEmptyIndex(strokesB)) + 1, 1), 18);
+    setHole(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [m.id]);
+
+  function setScore(side, val) {
+    const i = hole - 1;
+    const a = strokesA.slice();
+    const b = strokesB.slice();
+    if (side === "A") a[i] = clampStrokeInput(val);
+    else b[i] = clampStrokeInput(val);
+    onUpdateMatch(m.id, { strokesA: a, strokesB: b });
+
+    // auto-advance
+    if (a[i] !== "" && b[i] !== "" && hole < 18) setHole((h) => Math.min(h + 1, 18));
+  }
+
+  function prev() {
+    setIdx((i) => Math.max(i - 1, 0));
+  }
+  function next() {
+    setIdx((i) => Math.min(i + 1, allMatches.length - 1));
+  }
+
+  const holeWinner = holes[hole - 1];
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white text-gray-900 dark:from-zinc-950 dark:to-black dark:text-white">
+      <TopBar
+        title="Scorekeeper"
+        subtitle="One match at a time • big inputs • fast entry"
+        right={
+          <>
+            <IconButton onClick={onBack}>Exit</IconButton>
+            <IconButton onClick={onToggleDark}>{darkMode ? "Light" : "Dark"}</IconButton>
+          </>
+        }
+      />
+
+      <div className="max-w-3xl mx-auto p-4 sm:p-6">
+        <Card className="p-4 sm:p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-xs text-gray-600 dark:text-gray-300">{current.sessionName} • {current.sessionFormat}</div>
+              <div className="mt-1 text-lg font-semibold">{m.time}</div>
+              <div className="mt-2 text-sm">
+                <div className="font-medium teamA-text">{m.aPlayers}</div>
+                <div className="font-medium teamB-text">{m.bPlayers}</div>
+              </div>
+            </div>
+            <div className="text-right">
+              <Badge tone={m.autoFromHoles ? "good" : "neutral"}>{m.autoFromHoles ? "Auto" : "Manual"}</Badge>
+              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">{m.autoFromHoles ? (auto?.status || "") : "Manual"}</div>
+              {m.autoFromHoles && auto?.winner ? <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">Final: <b>{auto.winner} {auto.resultText}</b></div> : null}
+            </div>
+          </div>
+
+          <div className="mt-5 rounded-2xl border border-black/10 bg-gray-50 p-3 dark:bg-white/5 dark:border-white/10">
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-semibold">Hole {hole}</div>
+              <select
+                value={hole}
+                onChange={(e) => setHole(parseInt(e.target.value, 10))}
+                className="rounded-xl border border-black/10 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10"
+              >
+                {Array.from({ length: 18 }).map((_, i) => (
+                  <option key={i} value={i + 1}>{i + 1}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">{teamA}</div>
+                <input
+                  inputMode="numeric"
+                  value={strokesA[hole - 1]}
+                  onChange={(e) => setScore("A", e.target.value)}
+                  className="w-full text-lg rounded-2xl border border-black/10 bg-white px-4 py-3 focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10"
+                  placeholder="—"
+                />
+              </div>
+              <div>
+                <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">{teamB}</div>
+                <input
+                  inputMode="numeric"
+                  value={strokesB[hole - 1]}
+                  onChange={(e) => setScore("B", e.target.value)}
+                  className="w-full text-lg rounded-2xl border border-black/10 bg-white px-4 py-3 focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10"
+                  placeholder="—"
+                />
+              </div>
+            </div>
+
+            <div className="mt-3">
+              <div className="text-xs text-gray-600 dark:text-gray-300">Hole result</div>
+              <div className="mt-1">
+                {holeWinner === "A" ? <Badge tone="a">{teamA} wins</Badge> : holeWinner === "B" ? <Badge tone="b">{teamB} wins</Badge> : holeWinner === "H" ? <Badge>Halved</Badge> : <Badge tone="warn">Pending</Badge>}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 flex items-center justify-between">
+            <IconButton onClick={prev} title="Previous match">← Prev</IconButton>
+            <div className="text-sm text-gray-600 dark:text-gray-300">Match {idx + 1} of {allMatches.length}</div>
+            <IconButton onClick={next} title="Next match">Next →</IconButton>
+          </div>
+        </Card>
+      </div>
+
+      <TeamThemeStyles />
+    </div>
+  );
+}
+
+// -------------------------
+// Components
+// -------------------------
+
+function PlayersTable({ title, tone, rows }) {
+  return (
+    <Card className="p-4 sm:p-5">
+      <div className="flex items-center justify-between">
+        <div className="text-lg font-semibold tracking-tight">{title}</div>
+        <Badge tone={tone}>{tone === "a" ? "Black / Yellow" : "Blue / White"}</Badge>
+      </div>
+      <div className="mt-3 overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs text-gray-600 dark:text-gray-300 border-b border-black/10 dark:border-white/10">
+              <th className="py-2 pr-3">Player</th>
+              <th className="py-2 pr-3">W</th>
+              <th className="py-2 pr-3">L</th>
+              <th className="py-2 pr-3">H</th>
+              <th className="py-2 pr-3">Pts</th>
+              <th className="py-2 pr-3">Matches</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr key={p.name} className="border-b border-black/5 dark:border-white/10 last:border-b-0">
+                <td className="py-2 pr-3 font-medium">{p.name}</td>
+                <td className="py-2 pr-3">{p.w}</td>
+                <td className="py-2 pr-3">{p.l}</td>
+                <td className="py-2 pr-3">{p.h}</td>
+                <td className="py-2 pr-3 font-semibold">{formatPoints(p.pts)}</td>
+                <td className="py-2 pr-3">{p.matches}</td>
+              </tr>
+            ))}
+            {!rows.length ? (
+              <tr><td colSpan={6} className="py-4 text-sm text-gray-600 dark:text-gray-300">No completed matches yet.</td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function RosterPanel({ title, tone, list, newValue, setNewValue, onAdd, onUpdate, onRemove }) {
+  return (
+    <Card className="p-4 sm:p-5">
+      <div className="flex items-center justify-between">
+        <div className="text-lg font-semibold tracking-tight">{title}</div>
+        <Badge tone={tone}>{tone === "a" ? "Black / Yellow" : "Blue / White"}</Badge>
+      </div>
+
+      <div className="mt-3 flex gap-2">
+        <input
+          value={newValue}
+          onChange={(e) => setNewValue(e.target.value)}
+          placeholder="Add player…"
+          className="flex-1 rounded-xl border border-black/10 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10"
+        />
+        <IconButton onClick={onAdd} primary>Add</IconButton>
+      </div>
+
+      <div className="mt-4 overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs text-gray-600 dark:text-gray-300 border-b border-black/10 dark:border-white/10">
+              <th className="py-2 pr-3">Name</th>
+              <th className="py-2 pr-3">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((name, idx) => (
+              <tr key={idx} className="border-b border-black/5 dark:border-white/10 last:border-b-0">
+                <td className="py-2 pr-3">
+                  <input
+                    value={name}
+                    onChange={(e) => onUpdate(idx, e.target.value)}
+                    className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10"
+                  />
+                </td>
+                <td className="py-2 pr-3">
+                  <IconButton onClick={() => onRemove(idx)} title="Remove">Remove</IconButton>
+                </td>
+              </tr>
+            ))}
+            {!list.length ? (
+              <tr><td colSpan={2} className="py-4 text-sm text-gray-600 dark:text-gray-300">No players yet.</td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function MatchRow({ teamA, teamB, rosterA, rosterB, match, auto, status, points, onToggleExpand, expanded, onUpdate }) {
+  const [editing, setEditing] = useState(false);
+
+  function applyRoster(side, names) {
+    const joined = names.join(" / ");
+    if (side === "A") onUpdate(match.id, { aPlayers: joined });
+    else onUpdate(match.id, { bPlayers: joined });
+  }
+
+  return (
+    <tr className="bg-gray-50 dark:bg-white/5">
+      <td className="px-3 py-3 rounded-l-2xl text-sm whitespace-nowrap text-gray-800 dark:text-gray-100">{match.time}</td>
+
+      <td className="px-3 py-3 text-sm">
+        {editing ? (
+          <div className="space-y-2">
+            <PlayerPicker label={teamA} roster={rosterA} valueText={match.aPlayers} onPick={(names) => applyRoster("A", names)} />
+            <input
+              value={match.aPlayers}
+              onChange={(e) => onUpdate(match.id, { aPlayers: e.target.value })}
+              className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10"
+            />
+          </div>
+        ) : (
+          <div className="font-medium teamA-text">{match.aPlayers}</div>
+        )}
+      </td>
+
+      <td className="px-3 py-3 text-sm">
+        {editing ? (
+          <div className="space-y-2">
+            <PlayerPicker label={teamB} roster={rosterB} valueText={match.bPlayers} onPick={(names) => applyRoster("B", names)} />
+            <input
+              value={match.bPlayers}
+              onChange={(e) => onUpdate(match.id, { bPlayers: e.target.value })}
+              className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10"
+            />
+          </div>
+        ) : (
+          <div className="font-medium teamB-text">{match.bPlayers}</div>
+        )}
+      </td>
+
+      <td className="px-3 py-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <label className="inline-flex items-center gap-2 text-sm text-gray-800 dark:text-gray-200">
+            <input type="checkbox" checked={!!match.autoFromHoles} onChange={(e) => onUpdate(match.id, { autoFromHoles: e.target.checked })} />
+            <span>Auto</span>
+          </label>
+
+          <button
+            type="button"
+            onClick={onToggleExpand}
+            className={
+              "px-2.5 py-1.5 text-sm rounded-lg border transition focus:outline-none focus:ring-2 focus:ring-black/10 dark:focus:ring-white/10 " +
+              (expanded
+                ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                : "bg-white hover:bg-gray-50 border-black/10 dark:bg-zinc-900 dark:hover:bg-white/5 dark:border-white/10")
+            }
+          >
+            Strokes
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setEditing((v) => !v)}
+            className="px-2.5 py-1.5 text-sm rounded-lg border bg-white hover:bg-gray-50 border-black/10 transition focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:hover:bg-white/5 dark:border-white/10 dark:focus:ring-white/10"
+          >
+            {editing ? "Done" : "Edit"}
+          </button>
+        </div>
+      </td>
+
+      <td className="px-3 py-3">
+        <div className="flex flex-wrap gap-2">
+          <SegButton active={match.winner === teamA} onClick={() => onUpdate(match.id, { winner: teamA })}>{teamA}</SegButton>
+          <SegButton active={match.winner === teamB} onClick={() => onUpdate(match.id, { winner: teamB })}>{teamB}</SegButton>
+          <SegButton active={match.winner === "Halved"} onClick={() => onUpdate(match.id, { winner: "Halved" })}>Halved</SegButton>
+          <SegButton active={!match.winner} onClick={() => onUpdate(match.id, { winner: "" })}>Pending</SegButton>
+        </div>
+        {match.autoFromHoles && auto?.winner ? (
+          <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">Auto winner: <b>{auto.winner}</b></div>
+        ) : null}
+      </td>
+
+      <td className="px-3 py-3">
+        <input
+          value={match.resultText || ""}
+          onChange={(e) => onUpdate(match.id, { resultText: e.target.value })}
+          placeholder="e.g. 4&2"
+          className="w-32 rounded-xl border bg-white px-3 py-2 text-sm border-black/10 disabled:bg-gray-100 disabled:text-gray-500 focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10 dark:disabled:bg-white/5 dark:disabled:text-gray-400"
+          disabled={match.autoFromHoles && !!(auto?.resultText)}
+        />
+        {match.autoFromHoles && auto?.resultText ? <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">Auto: <b>{auto.resultText}</b></div> : null}
+      </td>
+
+      <td className="px-3 py-3 text-sm text-gray-700 dark:text-gray-200">{status || ""}</td>
+
+      <td className="px-3 py-3 rounded-r-2xl text-right text-sm whitespace-nowrap">
+        <span className="font-semibold teamA-text">{formatPoints(points.a)}</span>
+        <span className="text-gray-400"> – </span>
+        <span className="font-semibold teamB-text">{formatPoints(points.b)}</span>
+      </td>
+    </tr>
+  );
+}
+
+function PlayerPicker({ label, roster, valueText, onPick }) {
+  const [selected, setSelected] = useState(() => splitPlayers(valueText));
+
+  useEffect(() => {
+    setSelected(splitPlayers(valueText));
+  }, [valueText]);
+
+  function toggle(name) {
+    const exists = selected.some((x) => x.toLowerCase() === name.toLowerCase());
+    const next = exists ? selected.filter((x) => x.toLowerCase() !== name.toLowerCase()) : [...selected, name];
+    setSelected(next);
+    onPick(next);
+  }
+
+  return (
+    <div>
+      <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Pick from roster ({label})</div>
+      <div className="flex flex-wrap gap-2">
+        {roster.slice(0, 20).map((name) => {
+          const active = selected.some((x) => x.toLowerCase() === name.toLowerCase());
+          return (
+            <button
+              type="button"
+              key={name}
+              onClick={() => toggle(name)}
+              className={
+                "px-2.5 py-1.5 text-xs rounded-full border transition " +
+                (active
+                  ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                  : "bg-white hover:bg-gray-50 border-black/10 dark:bg-zinc-900 dark:hover:bg-white/5 dark:border-white/10")
+              }
+            >
+              {name}
+            </button>
+          );
+        })}
+        {!roster.length ? <Badge tone="warn">Add names in Roster</Badge> : null}
+      </div>
+    </div>
+  );
+}
+
+function StrokesEditor({ teamA, teamB, strokesA, strokesB, onChange, onClear }) {
+  const a = normalizeStrokeArray(strokesA);
+  const b = normalizeStrokeArray(strokesB);
+
+  const [quickHole, setQuickHole] = useState(() => {
+    const idx = Math.max(lastNonEmptyIndex(a), lastNonEmptyIndex(b));
+    return Math.min(Math.max(idx + 1, 1), 18);
+  });
+
+  const holes = holesFromStrokes(a, b);
+  const auto = computeFromHoles(holes, teamA, teamB);
+
+  function setA(i, v) {
+    const nextA = a.slice();
+    nextA[i] = clampStrokeInput(v);
+    onChange(nextA, b);
+  }
+
+  function setB(i, v) {
+    const nextB = b.slice();
+    nextB[i] = clampStrokeInput(v);
+    onChange(a, nextB);
+  }
+
+  function quickSet(side, v) {
+    const idx = quickHole - 1;
+    if (side === "A") setA(idx, v);
+    else setB(idx, v);
+  }
+
+  useEffect(() => {
+    const idx = quickHole - 1;
+    if (a[idx] !== "" && b[idx] !== "" && quickHole < 18) setQuickHole((h) => Math.min(h + 1, 18));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [a.join("|"), b.join("|")]);
+
+  const holeBadge = (h) => {
+    if (h === "A") return <Badge tone="a">{teamA}</Badge>;
+    if (h === "B") return <Badge tone="b">{teamB}</Badge>;
+    if (h === "H") return <Badge>Halved</Badge>;
+    return <Badge tone="warn">Pending</Badge>;
+  };
+
+  return (
+    <div className="mt-3 rounded-2xl border border-black/10 bg-white p-3 sm:p-4 shadow-sm dark:bg-zinc-950 dark:border-white/10">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-semibold tracking-tight">Strokes</div>
+          <div className="text-xs text-gray-600 mt-0.5 dark:text-gray-300">Lower wins the hole • Tie = halved.</div>
+        </div>
+        <IconButton onClick={onClear}>Clear</IconButton>
+      </div>
+
+      <div className="mt-3 rounded-2xl border border-black/10 bg-gray-50 p-3 dark:bg-white/5 dark:border-white/10">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <div className="text-sm font-semibold">Quick Entry</div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">Auto-advances when both sides are filled.</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm">Hole</div>
+            <select
+              value={quickHole}
+              onChange={(e) => setQuickHole(parseInt(e.target.value, 10))}
+              className="rounded-xl border border-black/10 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10"
+            >
+              {Array.from({ length: 18 }).map((_, i) => (
+                <option key={i} value={i + 1}>{i + 1}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-col sm:flex-row gap-2">
+          <div className="flex-1">
+            <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">{teamA}</div>
+            <input inputMode="numeric" value={a[quickHole - 1]} onChange={(e) => quickSet("A", e.target.value)} className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10" placeholder="—" />
+          </div>
+          <div className="flex-1">
+            <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">{teamB}</div>
+            <input inputMode="numeric" value={b[quickHole - 1]} onChange={(e) => quickSet("B", e.target.value)} className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10" placeholder="—" />
+          </div>
+          <div className="sm:w-56">
+            <div className="text-xs text-gray-600 dark:text-gray-300 mb-1">Hole result</div>
+            <div className="h-[42px] flex items-center">{holeBadge(holes[quickHole - 1])}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs text-gray-600 dark:text-gray-300 border-b border-black/10 dark:border-white/10">
+              <th className="py-2 pr-3">Hole</th>
+              <th className="py-2 pr-3">{teamA}</th>
+              <th className="py-2 pr-3">{teamB}</th>
+              <th className="py-2 pr-3">Winner</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: 18 }).map((_, idx) => (
+              <tr key={idx} className="border-b border-black/5 dark:border-white/10 last:border-b-0">
+                <td className="py-2 pr-3 text-gray-700 dark:text-gray-200 font-medium">{idx + 1}</td>
+                <td className="py-2 pr-3"><input inputMode="numeric" value={a[idx]} onChange={(e) => setA(idx, e.target.value)} className="w-20 rounded-xl border bg-white px-3 py-2 text-sm border-black/10 focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10" placeholder="—" /></td>
+                <td className="py-2 pr-3"><input inputMode="numeric" value={b[idx]} onChange={(e) => setB(idx, e.target.value)} className="w-20 rounded-xl border bg-white px-3 py-2 text-sm border-black/10 focus:outline-none focus:ring-2 focus:ring-black/10 dark:bg-zinc-900 dark:border-white/10 dark:focus:ring-white/10" placeholder="—" /></td>
+                <td className="py-2 pr-3">{holeBadge(holes[idx])}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <div className="text-sm text-gray-700 dark:text-gray-200"><span className="font-semibold">Status:</span> {auto.status}</div>
+        <div className="text-xs text-gray-600 dark:text-gray-300">Enter only the holes you’ve played — status updates live.</div>
+      </div>
+    </div>
+  );
+}
+
+// -------------------------
+// Tiny toast
+// -------------------------
+
+let toastTimer = null;
+function toast(msg) {
+  const id = "__toast";
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = id;
+    el.style.position = "fixed";
+    el.style.left = "50%";
+    el.style.bottom = "24px";
+    el.style.transform = "translateX(-50%)";
+    el.style.zIndex = "9999";
+    el.style.padding = "10px 14px";
+    el.style.borderRadius = "14px";
+    el.style.border = "1px solid rgba(0,0,0,0.12)";
+    el.style.background = "rgba(255,255,255,0.92)";
+    el.style.backdropFilter = "blur(10px)";
+    el.style.fontSize = "14px";
+    el.style.boxShadow = "0 8px 30px rgba(0,0,0,0.12)";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = "1";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    if (el) el.style.opacity = "0";
+  }, 1700);
+}
